@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dyeing Sheet Scanner</title>
+<style>
+:root{--bg:#f4f6fa;--c:#fff;--t:#1d2433;--m:#5d6679;--b:#d5dbe6;--p:#305496;--w:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14171d;--c:#1d222b;--t:#e8ecf3;--m:#9aa4b6;--b:#323a48;--p:#6f93d8;--w:#10141b}}
+:root[data-theme="dark"]{--bg:#14171d;--c:#1d222b;--t:#e8ecf3;--m:#9aa4b6;--b:#323a48;--p:#6f93d8;--w:#10141b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px/1.4 Arial,sans-serif;padding:12px}
+h1{font-size:18px;margin:0 0 10px}.card{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:12px;margin-bottom:10px}
+.up{display:block;text-align:center;border:2px dashed var(--p);border-radius:12px;padding:26px 10px;color:var(--p);font-size:16px;font-weight:bold;cursor:pointer}
+button{background:var(--p);color:var(--w);border:0;border-radius:8px;padding:10px 14px;font-size:14px;cursor:pointer}
+button.g{background:transparent;color:var(--p);border:1px solid var(--p)}button:disabled{opacity:.5}
+.tw{overflow-x:auto;max-height:70vh}table{border-collapse:collapse;font-size:12px}th{background:var(--p);color:var(--w);padding:5px;white-space:nowrap;position:sticky;top:0}
+td{border:1px solid var(--b);padding:0}td input{border:0;background:transparent;color:var(--t);padding:5px;font-size:12px;min-width:70px;width:100%}
+td.r{padding:3px 5px;white-space:nowrap}.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.s{color:var(--m);font-size:12px}
+input[type=date]{padding:7px;border:1px solid var(--b);border-radius:6px;background:var(--c);color:var(--t)}
+</style></head><body>
+<h1 id="ttl">Dyeing Sheet Scanner</h1>
+<div class="card">
+ <label class="up" for="f">⬆ Upload PDF or photo(s)</label>
+ <input id="f" type="file" accept="application/pdf,image/*" multiple hidden>
+ <p class="s" id="msg">Pick the scanned production sheets. Claude reads them and builds the table.</p>
+ <details id="set" style="display:none" open><summary class="s">Setup</summary><p class="s">Anthropic API key (saved only in this browser):</p><input id="key" type="password" placeholder="sk-ant-..." style="width:100%;padding:8px"><p class="s">Model:</p><input id="mdl" value="claude-sonnet-5-5" style="width:100%;padding:8px"></details>
+</div>
+<div class="card" id="res" style="display:none">
+ <div class="bar"><label>Date <input type="date" id="dt"></label><button id="dl">Download Excel</button><button class="g" id="clr">Clear</button><span class="s" id="sum"></span></div>
+ <p class="s">Edit any cell before downloading. Please check batch numbers and times against the paper.</p>
+ <div class="tw"><table id="tb"></table></div>
+</div>
+<script>
+const H=["SL NO","M/C NO","MC CAPACITY","BUYER","ORDER/STYLE","BATCH NO","COLOR","FABRICATION","QTY","LOAD TIME","UNLOAD TIME","TOTAL TIME","RFT","SHIFT","CATEGORY","REMARKS","REMARKS 2"];
+const K=["mc","cap","buyer","order","batch","color","fab","qty","load","unload","total","rft","shift","cat","rem","rem2"];
+const CAP={22:1500,1:1500,2:1500,3:1200,4:1200,5:1000,6:1000,7:1000,8:750,9:750,10:750,11:500,12:300,13:250,14:250,15:400,16:180,17:500,18:500,19:180,20:100,21:100,23:1000,101:1500,102:900,103:750,104:500,105:400,106:200};
+const capOf=m=>{const n=parseInt(String(m).trim(),10);return isNaN(n)?'':(CAP[n]||'')};
+const $=i=>document.getElementById(i);let rows=[],busy=false;
+let tp=0;$('ttl').onclick=()=>{if(++tp>=5){$('set').style.display='block'}setTimeout(()=>tp=0,4000)};if(location.hash==='#setup')$('set').style.display='block';
+$('key').value=localStorage.getItem('dy_key')||'';$('mdl').value=localStorage.getItem('dy_model')||'claude-sonnet-5-5';
+$('key').onchange=()=>localStorage.setItem('dy_key',$('key').value.trim());$('mdl').onchange=()=>localStorage.setItem('dy_model',$('mdl').value.trim());
+const P=`You are reading handwritten "DAILY DYEING PRODUCTION REPORT" sheets (M.N. Dyeing, Bangladesh). You get TWO upright images of one two-page spread: image 1 = LEFT page (columns M/C NO, BUYER, ORDER/STYLE, BATCH NO, COLOR, FABRICATION, GSM, DIA, QTY); image 2 = RIGHT page (LOAD TIME, UNLOAD TIME, TOTAL TIME, RFT, SHIFT, REMARKS, with DATE at the top). Line n on the left matches line n on the right, so align them carefully. Reply with ONLY JSON: {"date":"YYYY-MM-DD or empty","rows":[{"mc":"","buyer":"","order":"","batch":"","color":"","fab":"","qty":"","load":"","unload":"","total":"","rft":"","shift":"","rem":"","rem2":""}]}. Rules: ignore GSM and DIA; qty is a number; times like "11:20 Am"; a machine-wash line has color "M/C Wash" and rem "M/C Wash"; skip fully blank lines and struck-out rows; copy batch numbers exactly as written; if a field is unreadable leave it empty rather than guess; rem2 holds the end-of-line note such as B2B, Recheck or 1st Batch; keep rows in page order.`;
+function cat(r){const s=(r||'').toUpperCase();if(s.includes('DPD'))return'DPD';if(s.includes('RFD'))return'Scouring';if(s.includes('WHITE')&&!s.includes('N.WASH'))return'White';
+ return['AVG','DARK','BLACK','LIGHT','EX-DK','EX DK'].some(k=>s.includes(k))?'Color':''}
+function loadImg(blob){return new Promise((ok,no)=>{const i=new Image();i.onload=()=>ok(i);i.onerror=no;i.src=URL.createObjectURL(blob)})}
+function halves(src,w,h,rot){ // rot: degrees clockwise applied to make it upright landscape
+ const c=document.createElement('canvas'),q=rot%180?[h,w]:[w,h];c.width=q[0];c.height=q[1];const x=c.getContext('2d');
+ x.translate(c.width/2,c.height/2);x.rotate(rot*Math.PI/180);x.drawImage(src,-w/2,-h/2);
+ const cut=(a,b)=>new Promise(r=>{const d=document.createElement('canvas');const k=Math.min(1,2000/c.height),sw=(b-a)*c.width;d.width=sw*k;d.height=c.height*k;d.getContext('2d').drawImage(c,a*c.width,0,sw,c.height,0,0,d.width,d.height);d.toBlob(r,'image/jpeg',.92)});
+ return Promise.all([cut(0,.51),cut(.49,1)])}
+async function pagesOf(file){
+ if(file.type==='application/pdf'){
+  if(!window.pdfjsLib){await new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';s.onload=ok;s.onerror=()=>no(new Error('PDF reader could not load; please upload photos instead'));document.head.appendChild(s)});
+   pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'}
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise,out=[];
+  for(let n=1;n<=pdf.numPages;n++){const pg=await pdf.getPage(n),vp=pg.getViewport({scale:2.2}),c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;
+   await pg.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;out.push(c)}
+  return out}
+ return [await loadImg(file)]}
+function parse(t){t=t.replace(/```json|```/g,'');const o=JSON.parse(t.slice(t.indexOf('{'),t.lastIndexOf('}')+1));return o}
+const b64=bl=>new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result.split(',')[1]);f.readAsDataURL(bl)});
+async function ask(pair){const key=$('key').value.trim();localStorage.setItem('dy_key',key);
+ const imgs=await Promise.all(pair.map(async b=>({type:'image',source:{type:'base64',media_type:'image/jpeg',data:await b64(b)}})));
+ const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+  body:JSON.stringify({model:$('mdl').value.trim()||'claude-sonnet-5-5',max_tokens:16000,messages:[{role:'user',content:imgs.concat([{type:'text',text:P}])}]})});
+ const j=await r.json();if(!r.ok)throw new Error((j.error&&j.error.message)||('Error '+r.status));
+ return parse(j.content.map(c=>c.text||'').join(''))}
+async function run(files){
+ if(busy)return;busy=true;const m=$('msg');
+ try{if(!$('key').value.trim()){m.textContent='Not set up on this device yet. Tap the page title 5 times to enter the key once.';busy=false;return}
+  let pages=[];for(const f of files){m.textContent='Preparing '+f.name+'…';pages=pages.concat(await pagesOf(f))}
+  for(let i=0;i<pages.length;i++){m.textContent='Reading page '+(i+1)+' of '+pages.length+'… (about a minute each)';
+   const s=pages[i],w=s.naturalWidth||s.width,h=s.naturalHeight||s.height;let rot=h>w?270:0,o;
+   o=await ask(await halves(s,w,h,rot));
+   if(!(o.rows||[]).length){o=await ask(await halves(s,w,h,(rot+180)%360))}
+   if(o.date&&!$('dt').value)$('dt').value=o.date;
+   (o.rows||[]).forEach(r=>{const x={};K.forEach(k=>x[k]=r[k]==null?'':String(r[k]).trim());x.qty=x.qty.replace(/[^\d.]/g,'');
+    if(x.batch&&!x.batch.startsWith('260'))x.batch='260'+x.batch;x.cap=capOf(x.mc);rows.push(x)})}
+  m.textContent='Done. '+rows.length+' rows read. Review the table, then download.';draw()}
+ catch(e){m.textContent='Could not read: '+((e&&e.message)||e)+(rows.length?' (rows read so far are kept below)':'');if(rows.length)draw()}
+ busy=false}
+function draw(){$('res').style.display=rows.length?'block':'none';if(!$('dt').value)$('dt').value=new Date().toISOString().slice(0,10);
+ let h='<tr><th>#</th>'+H.slice(1).map(x=>'<th>'+x+'</th>').join('')+'<th></th></tr>';
+ rows.forEach((r,i)=>{r.cat=r.color==='M/C Wash'?'':cat(r.rem);h+='<tr><td class="r">'+(i+1)+'</td>'+K.map(k=>'<td><input data-i="'+i+'" data-k="'+k+'" value="'+String(r[k]).replace(/"/g,'&quot;')+'"'+(k==='cat'?' readonly':'')+'></td>').join('')+'<td class="r"><button class="g" data-del="'+i+'">✕</button></td></tr>'});
+ $('tb').innerHTML=h;$('sum').textContent=rows.length+' rows · QTY '+rows.reduce((a,r)=>a+(+r.qty||0),0).toLocaleString()}
+$('tb').addEventListener('change',e=>{const t=e.target;if(t.dataset.k){const r=rows[t.dataset.i];r[t.dataset.k]=t.value;if(t.dataset.k==='mc')r.cap=capOf(t.value)||r.cap;draw()}});
+$('tb').addEventListener('click',e=>{if(e.target.dataset.del!=null){rows.splice(+e.target.dataset.del,1);draw()}});
+$('clr').onclick=()=>{rows=[];$('dt').value='';$('res').style.display='none';$('msg').textContent='Pick the scanned production sheets.'};
+$('f').onchange=e=>{const fs=[...e.target.files];e.target.value='';if(fs.length)run(fs)};
+/* xlsx writer */
+const CT=(()=>{const t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+const crc=b=>{let c=-1;for(const x of b)c=CT[(c^x)&255]^(c>>>8);return(c^-1)>>>0};
+function zip(files){const E=new TextEncoder(),ch=[],cd=[];let off=0;const u16=n=>[n&255,n>>8&255],u32=n=>[n&255,n>>8&255,n>>16&255,n>>24&255];
+ for(const[n,s]of files){const nb=E.encode(n),d=E.encode(s),c=crc(d);
+  const lh=[0x50,0x4b,3,4,20,0,0,0,0,0,0,0,0,0,...u32(c),...u32(d.length),...u32(d.length),...u16(nb.length),0,0,...nb];ch.push(new Uint8Array(lh),d);
+  cd.push(new Uint8Array([0x50,0x4b,1,2,20,0,20,0,0,0,0,0,0,0,0,0,...u32(c),...u32(d.length),...u32(d.length),...u16(nb.length),0,0,0,0,0,0,0,0,0,0,0,0,...u32(off),...nb]));off+=lh.length+d.length}
+ const cs=cd.reduce((a,b)=>a+b.length,0);
+ return new Blob([...ch,...cd,new Uint8Array([0x50,0x4b,5,6,0,0,0,0,...u16(files.length),...u16(files.length),...u32(cs),...u32(off),0,0])],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})}
+const colL=i=>{let s='';i++;while(i){s=String.fromCharCode(65+(i-1)%26)+s;i=Math.floor((i-1)/26)}return s};
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+$('dl').onclick=()=>{
+ const data=[H].concat(rows.map((r,i)=>[i+1].concat(K.map(k=>r[k]))));
+ const x=data.map((r,ri)=>'<row r="'+(ri+1)+'">'+r.map((v,ci)=>{if(v===''||v==null)return'';const a=colL(ci)+(ri+1);
+  return ri&&[0,2,8].includes(ci)&&!isNaN(v)?'<c r="'+a+'"><v>'+v+'</v></c>':'<c r="'+a+'" t="inlineStr"'+(ri?'':' s="1"')+'><is><t>'+esc(v)+'</t></is></c>'}).join('')+'</row>').join('');
+ const X='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',R='http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+ const blob=zip([['[Content_Types].xml',X+'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'],
+ ['_rels/.rels',X+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="'+R+'/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+ ['xl/workbook.xml',X+'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="'+R+'"><sheets><sheet name="Dyeing Report" sheetId="1" r:id="rId1"/></sheets></workbook>'],
+ ['xl/_rels/workbook.xml.rels',X+'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="'+R+'/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="'+R+'/styles" Target="styles.xml"/></Relationships>'],
+ ['xl/styles.xml',X+'<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><name val="Arial"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="10"/><name val="Arial"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF305496"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0" xfId="0"/><xf fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>'],
+ ['xl/worksheets/sheet1.xml',X+'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="20" width="14" customWidth="1"/></cols><sheetData>'+x+'</sheetData></worksheet>']]);
+ const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Daily_Dyeing_Report_'+($('dt').value||'scan')+'.xlsx';document.body.appendChild(a);a.click();a.remove()};
+</script></body></html>
